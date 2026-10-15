@@ -1,0 +1,70 @@
+name: Export price history
+
+# Manual only. Extends the saved price history (e.g. to 500 trading days) and publishes it as
+# luk_data.csv.gz on the `price-data` branch, for backtesting.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Trading days of history (the free Massive plan allows about 2 years)"
+        default: "500"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: luk-scan        # never runs at the same time as the daily scan (they share the cache)
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pandas numpy
+
+      - name: Restore saved price history
+        uses: actions/cache/restore@v4
+        with:
+          path: luk_cache
+          key: luk-cache-${{ github.run_id }}
+          restore-keys: luk-cache-
+
+      - name: Download history and export prices
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          MASSIVE_PLAN: ${{ vars.MASSIVE_PLAN }}
+          DAYS: ${{ inputs.days }}
+        run: |
+          python luk_scanner.py --massive-days "$DAYS" --massive-plan "${MASSIVE_PLAN:-basic}" \
+            --export-data --out export_out
+
+      - name: Save price history for later runs
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: luk_cache
+          key: luk-cache-${{ github.run_id }}
+
+      - name: Publish luk_data.csv.gz to the price-data branch
+        run: |
+          gzip -9 -c export_out/luk_data.csv > /tmp/luk_data.csv.gz
+          ls -la /tmp/luk_data.csv.gz
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan price-data
+          git rm -rq --cached .
+          git clean -fdq -e luk_cache
+          cp /tmp/luk_data.csv.gz .
+          git add luk_data.csv.gz
+          git commit -qm "Price history export ($DAYS days requested, $(date -u +%F))"
+          git push -f origin price-data
+        env:
+          DAYS: ${{ inputs.days }}
