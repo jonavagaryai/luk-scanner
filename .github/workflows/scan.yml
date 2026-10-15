@@ -1,0 +1,82 @@
+name: Luk scan
+
+on:
+  schedule:
+    # 10:15 UTC, Tuesday to Saturday = 6:15 AM New York (5:15 AM in winter),
+    # after each trading day's data is published on Massive's free plan.
+    - cron: "15 10 * * 2-6"
+  workflow_dispatch: {}   # adds a "Run workflow" button (web and GitHub app)
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: luk-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # the first run downloads ~300 days on the free plan (~70 min)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the Massive key is set
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: |
+          if [ -z "$MASSIVE_API_KEY" ]; then
+            echo "::error::Add your Massive API key as a repository secret named MASSIVE_API_KEY (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pandas numpy
+
+      - name: Restore saved price history
+        uses: actions/cache/restore@v4
+        with:
+          path: luk_cache
+          key: luk-cache-${{ github.run_id }}
+          restore-keys: luk-cache-
+
+      - name: Run the scanner
+        env:
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+          ACCOUNT_SIZE: ${{ vars.ACCOUNT_SIZE }}
+          CHART_TICKERS: ${{ vars.CHART_TICKERS }}
+          MASSIVE_PLAN: ${{ vars.MASSIVE_PLAN }}
+        run: |
+          python luk_scanner.py \
+            --site site \
+            --out luk_cache/scans \
+            --account "${ACCOUNT_SIZE:-100000}" \
+            --chart-tickers "${CHART_TICKERS:-MU,SNDK,NVDA}" \
+            --massive-plan "${MASSIVE_PLAN:-basic}"
+
+      - name: Save price history for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: luk_cache
+          key: luk-cache-${{ github.run_id }}
+
+      - name: Upload the web page
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  publish:
+    needs: scan
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

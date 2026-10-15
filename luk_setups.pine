@@ -1,0 +1,127 @@
+//@version=5
+// Luk Momentum Setups - chart companion to luk_scanner.py
+// Daily chart: 9/21/50 EMAs, AVWAPs (from the 52-week high, the 6-month low, and an optional
+// manual anchor), ADR%, and markers for the same setups the Python scanner looks for.
+// Use it on daily for the setup, then drop to 5-min / hourly for the entry.
+// Educational tool, not financial advice.
+indicator("Luk Momentum Setups", shorttitle="Luk", overlay=true, max_bars_back=500)
+
+// ---------- inputs
+lenHi     = input.int(252, "AVWAP anchor: highest high lookback", minval=20)
+lenLo     = input.int(126, "AVWAP anchor: lowest low lookback", minval=20)
+useManual = input.bool(false, "Use a manual AVWAP anchor")
+anchorT   = input.time(timestamp("2026-01-02 00:00"), "Manual anchor date")
+minAdr    = input.float(5.0, "Min ADR %")
+momPct    = input.float(30.0, "Momentum: min % gain over 1, 3 or 6 months")
+flushTol  = input.float(0.3, "Pullback: flush tolerance %") / 100
+touchTol  = input.float(1.0, "Short: resistance touch tolerance %") / 100
+convPct   = input.float(4.0, "Coil: max 9/21/50 EMA spread %")
+epGap     = input.float(5.0, "EP: min gap %")
+epRvol    = input.float(2.5, "EP: min relative volume")
+
+// ---------- moving averages and ADR
+e9  = ta.ema(close, 9)
+e21 = ta.ema(close, 21)
+e50 = ta.ema(close, 50)
+adr = ta.sma((high / low - 1) * 100, 20)
+
+// ---------- anchored VWAPs via cumulative sums (anchor = rolling highest high / lowest low)
+cumPV = ta.cum(hlc3 * volume)
+cumV  = ta.cum(volume)
+f_avwap(off) =>
+    float res = na
+    if not na(off)
+        pv = cumPV - nz(cumPV[off + 1])
+        v  = cumV - nz(cumV[off + 1])
+        res := v > 0 ? pv / v : na
+    res
+offHi = -ta.highestbars(high, lenHi)
+offLo = -ta.lowestbars(low, lenLo)
+avHiRaw = f_avwap(offHi)
+avLoRaw = f_avwap(offLo)
+avHi  = offHi >= 3 ? avHiRaw : na
+avLo  = offLo >= 3 ? avLoRaw : na
+
+var float mPV = na
+var float mV  = na
+if useManual and time >= anchorT and na(mV)
+    mPV := 0.0
+    mV  := 0.0
+if not na(mV)
+    mPV += hlc3 * volume
+    mV  += volume
+avMan = useManual and mV > 0 ? mPV / mV : na
+
+plot(e9,  "9 EMA",  color=color.new(color.aqua, 0), linewidth=1)
+plot(e21, "21 EMA", color=color.new(color.orange, 0), linewidth=1)
+plot(e50, "50 EMA", color=color.new(color.red, 0), linewidth=2)
+plot(avHi,  "AVWAP from 52w high", color=color.new(color.fuchsia, 0), style=plot.style_linebr)
+plot(avLo,  "AVWAP from 6m low",   color=color.new(color.lime, 0), style=plot.style_linebr)
+plot(avMan, "AVWAP manual",        color=color.new(color.yellow, 0), style=plot.style_linebr)
+
+// ---------- shared conditions
+ret(n) => (close / close[n] - 1) * 100
+momentum = ret(21) >= momPct or ret(63) >= momPct or ret(126) >= momPct
+leader   = momentum and adr >= minAdr and close > e50
+cpos     = high > low ? (close - low) / (high - low) : 0.5
+uptrend  = close > e50 and e21 > e50 and e50 > e50[5]
+
+// ---------- 1. pullback long: flush below support, reclaim, close in upper half
+f_reclaim(lvl) => not na(lvl) and low <= lvl * (1 + flushTol) and close > lvl
+reclaim = f_reclaim(e9) or f_reclaim(e21) or f_reclaim(e50) or f_reclaim(avHi) or f_reclaim(avLo) or f_reclaim(avMan)
+pbLong  = leader and uptrend and reclaim and cpos >= 0.5
+
+// ---------- 2. breakout coil: converged EMAs, inside / tight day, near highs
+spread  = (math.max(e9, math.max(e21, e50)) - math.min(e9, math.min(e21, e50))) / close * 100
+inside  = high <= high[1] and low >= low[1]
+tight   = inside or (high - low) / low * 100 < 0.7 * adr
+nearHi  = close >= ta.highest(high, 252) * 0.85
+coil    = leader and close >= e21 * 0.98 and spread <= convPct and tight and nearHi
+
+// ---------- 3. episodic pivot
+rvol = volume / ta.sma(volume, 50)[1]
+gap  = (open / close[1] - 1) * 100
+ep   = gap >= epGap and rvol >= epRvol and close >= open
+
+// ---------- 4. pullback short: bounce into declining resistance, rejected
+below9Recent = math.sum(close[1] < e9[1] ? 1 : 0, 5) > 0
+rej9   = e9 < e9[1] and below9Recent and high >= e9 * (1 - touchTol) and close < e9
+down   = close < e50 and e21 < e21[5] and e50 < e50[5]
+rej21  = down and high >= e21 * (1 - touchTol) and close < e21
+rej50  = down and high >= e50 * (1 - touchTol) and close < e50
+rejAv  = not na(avHi) and avHi < avHi[5] and close < e21 and high >= avHi * (1 - touchTol) and close < avHi
+pbShort = (rej9 or rej21 or rej50 or rejAv) and cpos <= 0.5
+
+// ---------- markers
+plotshape(pbLong,  "Pullback long",  shape.triangleup,   location.belowbar, color.new(color.lime, 0),    text="PB")
+plotshape(coil and not pbLong, "Coil", shape.diamond,    location.abovebar, color.new(color.yellow, 0),  text="COIL")
+plotshape(ep,      "EP",             shape.labelup,      location.belowbar, color.new(color.aqua, 0),    text="EP", textcolor=color.black)
+plotshape(pbShort, "Pullback short", shape.triangledown, location.abovebar, color.new(color.red, 0),     text="SH")
+
+// Signal value for TradingView's Pine Screener / data window:
+// 1 = pullback long, 2 = coil, 3 = EP, -1 = pullback short, 0 = none
+signal = pbLong ? 1 : coil ? 2 : ep ? 3 : pbShort ? -1 : 0
+plot(signal, "Signal", display=display.data_window)
+plot(adr, "ADR %", display=display.data_window)
+plot(leader ? 1 : 0, "Leader", display=display.data_window)
+
+alertcondition(pbLong,  "Pullback long",  "{{ticker}}: flush and reclaim of support")
+alertcondition(coil,    "Coil",           "{{ticker}}: tight coil, watch today's high")
+alertcondition(ep,      "EP",             "{{ticker}}: gap-up on volume")
+alertcondition(pbShort, "Pullback short", "{{ticker}}: rejected at declining resistance")
+
+// ---------- info table
+var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 30), border_width=1)
+if barstate.islast
+    table.cell(info, 0, 0, "ADR %",  text_color=color.white)
+    table.cell(info, 1, 0, str.tostring(adr, "#.0"), text_color=adr >= minAdr ? color.lime : color.orange)
+    table.cell(info, 0, 1, "1M / 3M / 6M", text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(ret(21), "#") + " / " + str.tostring(ret(63), "#") + " / " + str.tostring(ret(126), "#") + " %", text_color=color.white)
+    table.cell(info, 0, 2, "Leader", text_color=color.white)
+    table.cell(info, 1, 2, leader ? "yes" : "no", text_color=leader ? color.lime : color.gray)
+    table.cell(info, 0, 3, "EMA spread", text_color=color.white)
+    table.cell(info, 1, 3, str.tostring(spread, "#.0") + " %", text_color=color.white)
+    table.cell(info, 0, 4, "Long stop (day low)", text_color=color.white)
+    table.cell(info, 1, 4, str.tostring((close - low) / close * 100, "#.0") + " %", text_color=color.white)
+    table.cell(info, 0, 5, "Setup", text_color=color.white)
+    table.cell(info, 1, 5, pbLong ? "PULLBACK LONG" : coil ? "COIL" : ep ? "EP" : pbShort ? "PULLBACK SHORT" : "-", text_color=color.yellow)
